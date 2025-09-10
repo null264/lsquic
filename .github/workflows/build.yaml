@@ -2,6 +2,8 @@ name: Build lsquic (Linux/Windows/macOS/Android)
 
 on:
   push:
+    tags:
+      - "v*" # 只在 push tag 时触发 Release job
   pull_request:
   workflow_dispatch:
 
