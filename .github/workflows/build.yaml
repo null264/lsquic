@@ -10,10 +10,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-20.04]
         include:
-          - os: ubuntu-20.04
+          - os: ubuntu-latest
+            target: linux
+          - os: ubuntu-latest
             target: android
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
 
     runs-on: ${{ matrix.os }}
 
@@ -21,22 +26,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies (Linux/macOS)
-        if: runner.os == 'Linux' || runner.os == 'macOS'
+      # ---------- Linux ----------
+      - name: Install dependencies (Linux)
+        if: matrix.target == 'linux'
         run: |
-          sudo apt-get update || true
-          if [ "$RUNNER_OS" == "Linux" ]; then
-            sudo apt-get install -y cmake ninja-build gcc g++ libssl-dev zlib1g-dev libevent-dev
-          else
-            brew install cmake ninja openssl zlib libevent
-          fi
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc g++ \
+            libssl-dev zlib1g-dev libevent-dev
 
+      - name: Build (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          mkdir build && cd build
+          cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSSL_ROOT_DIR=/usr \
+            -DOPENSSL_LIBRARIES=/usr/lib/x86_64-linux-gnu \
+            -DZLIB_ROOT=/usr
+          ninja
+
+      # ---------- Windows ----------
       - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install cmake ninja openssl zlib
+        if: matrix.target == 'windows'
+        run: choco install -y ninja openssl
 
-      # ================= Android 构建 =================
+      - name: Build (Windows)
+        if: matrix.target == 'windows'
+        run: |
+          mkdir build
+          cd build
+          cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release `
+            -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" `
+            -DOPENSSL_LIBRARIES="C:/Program Files/OpenSSL-Win64/lib"
+          ninja
+
+      # ---------- macOS ----------
+      - name: Install dependencies (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          brew update
+          brew install ninja openssl zlib libevent || true
+
+      - name: Build (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          mkdir build && cd build
+          cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl) \
+            -DZLIB_ROOT=$(brew --prefix zlib)
+          ninja
+
+      # ---------- Android ----------
       - name: Set up Android NDK
         if: matrix.target == 'android'
         run: |
@@ -45,27 +84,68 @@ jobs:
           echo "ANDROID_NDK_HOME=$HOME/android-ndk-r26d" >> $GITHUB_ENV
           echo "$HOME/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
-      - name: Build (Linux/macOS/Windows)
-        if: matrix.target != 'android'
-        run: |
-          mkdir build && cd build
-          cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release
-          ninja
-
-      - name: Build (Android)
+      - name: Build Android (all ABIs)
         if: matrix.target == 'android'
         run: |
-          mkdir build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=21 \
-            -GNinja
-          ninja
+          ABIS=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
+          for ABI in "${ABIS[@]}"; do
+            echo "Building Android ABI: $ABI"
+            mkdir -p build_$ABI && cd build_$ABI
+            cmake .. \
+              -GNinja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+              -DANDROID_ABI=$ABI \
+              -DANDROID_PLATFORM=21
+            ninja
+            cd ..
+          done
 
+      # ---------- Upload artifacts for CI ----------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lsquic-${{ matrix.os }}-${{ matrix.target || 'native' }}
-          path: build/bin/*
+          name: lsquic-${{ matrix.target }}
+          path: |
+            build/bin/*
+            build_arm64-v8a/bin/*
+            build_armeabi-v7a/bin/*
+            build_x86/bin/*
+            build_x86_64/bin/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create zip packages
+        run: |
+          mkdir release
+          for dir in artifacts/*; do
+            pkg=$(basename $dir).zip
+            cd $dir
+            zip -r ../../release/$pkg *
+            cd ../..
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
