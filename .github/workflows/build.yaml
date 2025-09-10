@@ -1,0 +1,71 @@
+name: Build lsquic (Linux/Windows/macOS/Android)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-20.04]
+        include:
+          - os: ubuntu-20.04
+            target: android
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux/macOS)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: |
+          sudo apt-get update || true
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get install -y cmake ninja-build gcc g++ libssl-dev zlib1g-dev libevent-dev
+          else
+            brew install cmake ninja openssl zlib libevent
+          fi
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install cmake ninja openssl zlib
+
+      # ================= Android 构建 =================
+      - name: Set up Android NDK
+        if: matrix.target == 'android'
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip -O ndk.zip
+          unzip -q ndk.zip -d $HOME
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk-r26d" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Build (Linux/macOS/Windows)
+        if: matrix.target != 'android'
+        run: |
+          mkdir build && cd build
+          cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release
+          ninja
+
+      - name: Build (Android)
+        if: matrix.target == 'android'
+        run: |
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=21 \
+            -GNinja
+          ninja
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsquic-${{ matrix.os }}-${{ matrix.target || 'native' }}
+          path: build/bin/*
